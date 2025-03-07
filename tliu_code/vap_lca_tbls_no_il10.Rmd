@@ -1,0 +1,555 @@
+---
+title: "vap_lca"
+author: "Ted Liu"
+date: "2025-02-26"
+output: word_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(tidyLPA)
+library(factoextra)
+library(mice)
+library(openxlsx)
+library(ggplot2)
+library(purrr)
+library(mclust)
+library(cluster)
+library(missForest)
+library(furrr)
+library(parallel)
+library(progressr)
+library(umap)
+library(arsenal)
+library(table1)
+library(sandwich)
+library(stringr)
+library(ComplexHeatmap)
+library(tidyr)
+library(dplyr)
+source("helper_functions.R")
+```
+
+
+```{r preprocess}
+df <- read.csv("./data/Daily_merged_2025-02-28.csv")
+df <- df %>% 
+  filter(repeat. == 1) %>%
+  filter(!is.na(balf_PD.L1_V1_imputed)) 
+vap_df <- df %>% filter(cohort == "vap")
+
+cols <- c("Age", "Sex", "BMI", "Race", 
+          "icu_admit_type", "bronch_day_1", "bronch_day_1_indexed_to_intubation", 
+          "X28d_mortality", "colony_1000_yes1_no0", "colony_10000_yes1_no0", 
+          "perc_neutrophils_bal_b1", "bal_nucleated_cells_b1", 
+          "hospital_mortality", "icu_mortality", "apache_iii_admit", 
+          "sofa_icu", "sofa_b1", "bronch_ecmo_0", "bronch_pf_8am_calculated_0", 
+          "bronch_sf_8am_calculated_0", "bronch_oi_8am_calculated_0", 
+          "vfds_admit", "vfds_bronch", "vfds_first_intubtation")
+
+missing_df <- vap_df %>%
+  dplyr::select(all_of(cols)) %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Missing_Count")
+
+write.csv(missing_df, "./tbl1_var_missing_counts.csv")
+
+
+vap_balf_biomarkers <- c("Amphiregulin", "Calprotectin", "CD163", "G.CSF", "GM.CSF", "IL.12.IL.23p40",
+                         "IL.15", "IL.16", "IL.17A", "IL.1α", "IL.1β_proinf", "IL.6_proinf", "IL.7",
+                         #"IL-8_chemo",
+                         "IL.8_proinf", #"IL.10_proinf", 
+                         "IP.10_chemo", "MCP.1_chemo", "MCP.4_chemo",
+                         "MIP.1α_chemo", "MIP.1β_chemo", "PD.L1", "sRAGE", "TARC_chemo", "TNF.RI", "TNF.α_proinf", "VEGF")
+
+
+vap_balf_biomarkers <- paste0("balf_", vap_balf_biomarkers, "_V1_imputed")
+
+vap_biomarkers <- vap_balf_biomarkers
+vap_df <- vap_df %>%
+  mutate(across(all_of(vap_biomarkers), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+vap_df[, vap_biomarkers] <- scale(log2(vap_df[, vap_biomarkers] + 1))
+
+vap_biomarkers_plus_id <- append(
+  vap_biomarkers, "subject_id"
+)
+
+
+vap_curr <- vap_df %>%
+  dplyr::select(all_of(vap_biomarkers_plus_id)) %>%
+  filter(if_any(vap_biomarkers, ~ !is.na(.)))  # remove subject ids who have all null
+
+vap_curr <- vap_curr %>%
+  mutate(subject_id = as.numeric(subject_id))
+
+# Remove columns that have more than 20% missing
+vap_curr <- vap_curr[, which(colMeans(!is.na(vap_curr)) > 0.2)]
+
+#write.csv(vap_curr, file="vap_biomarkers.csv")
+
+# Factorize outcomes for tbl1
+vap_df$Sex <- factor(vap_df$Sex)
+vap_df$X28d_mortality <- factor(vap_df$X28d_mortality)
+vap_df$colony_10000_yes1_no0 <- factor(vap_df$colony_10000_yes1_no0)
+vap_df$colony_1000_yes1_no0 <- factor(vap_df$colony_1000_yes1_no0)
+vap_df$apache_iii_admit <- as.numeric(vap_df$apache_iii_admit)
+vap_df$ARDS_final_1yes_0no <- factor(vap_df$ARDS_final_1yes_0no)
+vap_df$hospital_mortality <- factor(vap_df$hospital_mortality)
+vap_df$icu_mortality <- factor(vap_df$icu_mortality)
+vap_df$any_pressors_during_admission <- factor(vap_df$any_pressors_during_admission)
+vap_df$any_abx_during_admission <- factor(vap_df$any_abx_during_admission)
+vap_df$bronch_ecmo_0 <- factor(vap_df$bronch_ecmo_0)
+
+vap_df <- vap_df %>%
+   mutate(num_organisms = rowSums(across(matches("^BAL_\\d+_b1_datetime$"), ~ !is.na(.) & . != "")))
+
+
+```
+# MClust Results
+
+```{r mclust, eval=T}
+vap_bic <- mclustBIC(vap_curr %>% dplyr::select(-subject_id))
+plot(vap_bic)
+summary(vap_bic)
+
+vap_icl <- mclustICL(vap_curr %>% select(-subject_id))
+plot(vap_icl)
+summary(vap_icl)
+
+#LRT <- mclustBootstrapLRT(vap_curr %>% select(-subject_id), modelName = "VVE")
+#LRT
+```
+```{r tidylpa_vlmr}
+vap_curr %>% dplyr::select(-subject_id) %>%
+    estimate_profiles(1:12, 
+                      variances = c("equal", "varying", "equal"),
+                      covariances = c("zero", "zero", "equal"))
+
+m4 <- vap_curr %>% dplyr::select(-subject_id) %>%
+  estimate_profiles(9, variances = "equal", covariances = "equal")
+
+m5 <- vap_curr %>% dplyr::select(-subject_id) %>%
+  estimate_profiles(10, variances = "equal", covariances = "equal")
+
+m4_fit <- get_fit(m4)
+m5_fit <- get_fit(m5)
+
+n_obs <- nrow(vap_curr)
+
+m4_ll <- m4_fit$LogLik
+m5_ll <- m5_fit$LogLik
+
+m4_param <- m4$model_3_class_4$model$parameters$variance$
+m5_param <- m5$model_3_class_5$model$parameters$variance
+
+
+
+calc_lrt(n = n_obs, null_ll = m4_ll, null_param = m4_param, null_classes = 9, alt_ll = m5_ll, alt_param = m5_param, alt_classes = 10)
+
+#get_fit(lpa_testing)
+```
+
+```{r mclust_vlmr}
+
+data <- vap_curr %>% select(-subject_id)
+p <- ncol(data)
+
+# Set the number of latent classes based on your BIC result, e.g., k_opt = 3
+k_opt <- 5
+
+# Fit the models for k and k-1 classes
+model_k   <- Mclust(data, G = k_opt, modelNames = "VVE")
+model_k1  <- Mclust(data, G = k_opt - 1, modelNames = "VVE")
+
+# Compute the likelihood ratio test statistic
+LRT <- 2 * (model_k$loglik - model_k1$loglik)
+
+
+df_diff <- model_k$df - model_k1$df
+
+# Compute the p-value using a 50:50 mixture of chi-square distributions.
+# (That is, p = 0.5*(1-pchisq(LRT, df)) + 0.5*(1-pchisq(LRT, df+1)) )
+p_value <- 0.5 * (1 - pchisq(LRT, df_diff)) + 0.5 * (1 - pchisq(LRT, df_diff + 1))
+
+# Output the results
+cat("LRT statistic:", LRT, "\n")
+cat("Degrees of freedom difference:", df_diff, "\n")
+cat("VLMR test p-value:", p_value, "\n")
+
+entropy_k <- model_k[["z"]]
+entropy_k <- as.data.frame(entropy_k)
+colnames(entropy_k) <- c("C1", "C2", "C3", "C4", "C5")  # adjust based on k
+
+entropy_k <- entropy_k %>%
+  mutate(
+    ent1 = -C1 * log(C1),
+    ent2 = -C2 * log(C2),
+    ent3 = -C3 * log(C3),
+    ent4 = -C4 * log(C4),
+    ent5 = -C5 * log(C5),
+    ent_sum = ent1 + ent2 + ent3 + ent4 + ent5
+  )
+
+a <- mean(entropy_k$ent_sum)
+
+mixprob <- model_k$parameters$pro
+b <- (
+  (-mixprob[1] * log(mixprob[1])) + (-mixprob[2] * log(mixprob[2]))
+  + (-mixprob[3] * log(mixprob[3]))#+ (-mixprob[4] * log(mixprob[4]))
+  + (-mixprob[5] * log(mixprob[5]))
+)
+
+entropy <- (b - a) / b
+entropy
+
+```
+
+
+```{r mclust_bestmodel}
+# Assign the clusters to the dataframe
+best_model <- Mclust(vap_curr %>% select(-subject_id), G = 4, modelNames = "VVE")
+
+vap_curr$cluster <- best_model$classification
+vap_curr <- vap_curr %>%
+  mutate(subject_id = as.character(subject_id))
+
+vap_df_cluster <- vap_df %>%
+  left_join(vap_curr %>% select(subject_id, cluster), by = "subject_id")
+
+vap_cluster_id_only <- vap_df_cluster %>%
+  select(subject_id, cluster)
+
+write.csv(vap_cluster_id_only, "./vap_mclust_cluster_assignment_no_il10.csv")
+```
+```{r mclust_heatmap}
+# Order the data by cluster for better visualization
+vap_curr_ordered <- vap_curr %>% arrange(cluster)
+
+biomarker_matrix <- as.matrix(vap_curr_ordered %>% select(-subject_id, -cluster))
+
+
+# Assign row names as subject_id
+rownames(biomarker_matrix) <- vap_curr_ordered$subject_id
+
+# Create a row annotation to display the cluster assignment.
+row_ann <- rowAnnotation(
+  Cluster = factor(vap_curr_ordered$cluster),
+  col = list(Cluster = c("1" = "#E41A1C", "2" = "#377EB8",
+                         "3" = "#4DAF4A", "4" = "#984EA3", "5" = "yellow"))
+)
+
+# Generate the heatmap
+heatmap_obj <- Heatmap(
+  biomarker_matrix,
+  name = "Expression",          # Legend title
+  show_row_names = FALSE,       # Hide subject names to reduce clutter
+  show_column_names = TRUE,     # Display biomarker names
+  cluster_rows = FALSE,         # Keep the order based on clusters
+  cluster_columns = TRUE,       # Optionally cluster biomarkers
+  left_annotation = row_ann,    # Attach cluster annotation to rows
+  heatmap_legend_param = list(title = "Expression")
+)
+
+png(filename = "mclust_no_il10_heatmap.png", width = 800, height = 600)
+draw(heatmap_obj, newpage = TRUE)
+dev.off()
+
+```
+
+
+
+```{r mclust_tbl1, results='asis', eval=T}
+
+vap_df_cluster <- vap_df_cluster %>%
+  mutate(Race = trimws(sub(",.*", "", Race))) %>%
+  mutate(Race = gsub("Black or African-American", "Black or African American", Race)) %>%
+  mutate(Race = gsub("^Alaska Native.*", "American Indian or Native Alaskan", Race)) %>%
+  mutate(Race = gsub("^American Indian.*", "American Indian or Native Alaskan", Race)) %>%
+  mutate(Race = gsub("^Pacific Islander.*", "Native Hawaiian or Pacific Islander", Race)) %>%
+  mutate(Race = gsub("Unable to Collect", "Unavailable or Unknown", Race))
+
+desired_levels <- c("cineto1", "bahstrep2", "candida3", "citrobacter4", "oralflora5",
+                    "coryneanddipther6", "enterbacter7", "ecoli8", "hinflu9",
+                    "klebs10", "neisseria11", "pseudomonas12", "serratia13",
+                    "staph14", "spneumo15", "yeast16", "multiple17", "other18",
+                    "nothing19")
+
+vap_df_cluster <- vap_df_cluster %>%
+  mutate(mapped_organism = sapply(primary_organism_b1_datetime, map_category)) %>%
+  mutate(mapped_organism = factor(mapped_organism, levels = desired_levels)) %>%
+  arrange(mapped_organism)
+
+
+tbl1 <- tableby(
+  cluster ~ Age + Sex + BMI + Race + 
+    + icu_admit_type + bronch_day_1 + bronch_day_1_indexed_to_intubation + X28d_mortality + colony_1000_yes1_no0
+    + colony_10000_yes1_no0 + perc_neutrophils_bal_b1 + bal_nucleated_cells_b1 + X28d_mortality + hospital_mortality + icu_mortality
+    + apache_iii_admit + sofa_icu + sofa_b1 + bronch_ecmo_0 + bronch_pf_8am_calculated_0 + bronch_sf_8am_calculated_0 + bronch_oi_8am_calculated_0 
+    + vfds_admit + vfds_bronch + vfds_first_intubtation + mapped_organism, 
+  data=vap_df_cluster, control = tableby.control(numeric.stats = c("median", "q1q3"), test = FALSE, missing=TRUE))
+print(summary(tbl1, text = T))
+
+
+```
+
+```{r mclust_umap}
+set.seed(1)
+umap_res <- umap(vap_df_cluster %>% select(all_of(vap_biomarkers)))
+# Create a data frame from the UMAP layout and add the cluster assignments
+umap_data <- data.frame(UMAP1 = umap_res$layout[, 1],
+                        UMAP2 = umap_res$layout[, 2],
+                        cluster = as.factor(vap_df_cluster$cluster))
+
+# Plot the UMAP results colored by cluster
+p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = cluster)) +
+  geom_point(size = 1) +
+  theme_minimal() +
+  labs(title = "UMAP Plot of Clusters",
+       x = "UMAP Dimension 1",
+       y = "UMAP Dimension 2")
+ggsave(filename = "umap_mclust_no_il10.png")
+```
+
+```{r mclust_pca}
+set.seed(1)
+
+pca_res <- prcomp(vap_df_cluster %>% select(all_of(vap_biomarkers)), center = FALSE, scale. = FALSE)
+# Combine PCA results with the cluster information
+pca_data <- data.frame(pca_res$x, cluster = as.factor(vap_df_cluster$cluster))
+
+# Plot the first two principal components colored by cluster
+p <- ggplot(pca_data, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(size = 1) +
+  theme_minimal() +
+  labs(title = "PCA Plot of Clusters",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+
+ggsave(filename = "pca_mclust_no_il10.png")
+
+```
+
+
+
+
+
+
+```{r preprocess_rr_mplus, eval=F}
+set.seed(1)
+df <- read.csv("./data/Daily_merged_2025-02-28.csv")
+df <- df %>% 
+  filter(repeat. == 1) %>%
+  filter(!is.na(balf_PD.L1_V1_imputed)) 
+vap_df <- df %>% filter(cohort == "vap")
+
+vap_balf_biomarkers <- c("Amphiregulin", "Calprotectin", "CD163", "G.CSF", "GM.CSF", "IL.12.IL.23p40",
+                         "IL.15", "IL.16", "IL.17A", "IL.1α", "IL.1β_proinf", "IL.6_proinf", "IL.7",
+                         #"IL-8_chemo",
+                         "IL.8_proinf", #"IL.10_proinf", 
+                         "IP.10_chemo", "MCP.1_chemo", "MCP.4_chemo",
+                         "MIP.1α_chemo", "MIP.1β_chemo", "PD.L1", "sRAGE", "TARC_chemo", "TNF.RI", "TNF.α_proinf", "VEGF")
+
+
+vap_balf_biomarkers <- paste0("balf_", vap_balf_biomarkers, "_V1_imputed")
+
+vap_biomarkers <- vap_balf_biomarkers
+vap_df <- vap_df %>%
+  mutate(across(all_of(vap_biomarkers), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+vap_df[, vap_biomarkers] <- scale(log2(vap_df[, vap_biomarkers] + 1))
+
+vap_biomarkers_plus_id <- append(
+  vap_biomarkers, "subject_id"
+)
+
+
+vap_curr <- vap_df %>%
+  select(all_of(vap_biomarkers_plus_id)) %>%
+  filter(if_any(vap_biomarkers, ~ !is.na(.)))  # remove subject ids who have all null
+
+vap_curr <- vap_curr %>%
+  mutate(subject_id = as.numeric(subject_id))
+
+# Remove columns that have more than 20% missing
+vap_curr <- vap_curr[, which(colMeans(!is.na(vap_curr)) > 0.2)]
+
+
+cols <- c(
+    "AMPHIREG","CALPROTE","CD163","G_CSF",
+    "GM_CSF","IL_12_IL","IL_15","IL_16",
+    "IL_17A","IL_1A","IL_1B_PR","IL_6_PRO",
+    "IL_7","IL_8_PRO","IP_10_CH",
+    "MCP_1_CH","MCP_4_CH","MIP_1A_C", "MIP_1B_C",
+    "PD_L1","SRAGE","TARC_CHE",
+    "TNF_RI","TNF_A_PR","VEGF",
+    "CPROB1","CPROB2","CPROB3","CPROB4",
+    "C","SUBJECT"
+)
+mplus_df <- read.table("./data/vap_lca_4_class_w_il10.txt", header = FALSE, col.names = cols)
+mplus_df <- mplus_df %>%
+  mutate(subject_id = as.character(SUBJECT)) %>%
+  mutate(cluster = C)
+
+vap_df_cluster_mplus <- vap_df %>%
+  left_join(mplus_df %>% select(subject_id, cluster), by = "subject_id")
+
+```
+
+
+
+```{r rr_regressions_mplus, eval=F}
+# Initialize an empty data frame to store results
+#hospital_mortality
+#colony_10000_yes1_no0
+summary_table <- data.frame()
+# Loop over each biomarker
+for (biomarker in vap_biomarkers) {
+    print(paste0("At biomarker:", biomarker))
+    # Create the formula for the current biomarker
+    formula_rr <- as.formula(paste("colony_1000_yes1_no0 ~", biomarker, "*", "cluster", "+", "Age", "+", "Sex"))    
+    # Subset the data to include only hi_ddcfDNA and the current biomarker
+    df_current <- vap_df_cluster_mplus[, c("colony_1000_yes1_no0", biomarker, "cluster", "Age", "Sex")]
+    
+    # Remove NAs
+    df_current <- na.omit(df_current)
+    
+    # Fit the model
+    fit_poisson <- glm(formula_rr, data = df_current, family = poisson(link = "log"))
+    
+    # Calculate robust standard errors
+    robust_se <- sqrt(diag(vcovHC(fit_poisson, type = "HC0")))
+    
+    # Extract coefficients
+    estimates <- coef(fit_poisson)
+    rr_estimates <- exp(estimates)
+    
+    # Calculate z-values and p-values
+    z_values <- estimates / robust_se
+    p_values <- 2 * pnorm(-abs(z_values))
+    
+    # Prepare a data frame with the results
+    # [1] is the intercept [2] is the biomarker coefficient
+    result <- data.frame(
+        Predictor = biomarker,
+        Estimate = estimates[2],
+        "Robust SE" = robust_se[2],
+        "RR" = rr_estimates[2],
+        "z value" = z_values[2],
+        "Pr(>|z|)" = p_values[2],
+        "n_observations" = nrow(df_current)
+    )
+    
+    # Append the result to the summary_table
+    summary_table <- rbind(summary_table, result)
+}
+write.xlsx(summary_table, "./rr_mplus_colony_1000_yes1_no0_2.28.25.xlsx")
+```
+
+
+```{r preprocess_rr_clust, eval=F}
+set.seed(1)
+df <- read.csv("./data/Daily_merged_2025-02-28.csv")
+df <- df %>% 
+  filter(repeat. == 1) %>%
+  filter(!is.na(balf_PD.L1_V1_imputed)) 
+vap_df <- df %>% filter(cohort == "vap")
+
+vap_balf_biomarkers <- c("Amphiregulin", "Calprotectin", "CD163", "G.CSF", "GM.CSF", "IL.12.IL.23p40",
+                         "IL.15", "IL.16", "IL.17A", "IL.1α", "IL.1β_proinf", "IL.6_proinf", "IL.7",
+                         #"IL-8_chemo",
+                         "IL.8_proinf", #"IL.10_proinf", 
+                         "IP.10_chemo", "MCP.1_chemo", "MCP.4_chemo",
+                         "MIP.1α_chemo", "MIP.1β_chemo", "PD.L1", "sRAGE", "TARC_chemo", "TNF.RI", "TNF.α_proinf", "VEGF")
+
+
+vap_balf_biomarkers <- paste0("balf_", vap_balf_biomarkers, "_V1_imputed")
+
+vap_biomarkers <- vap_balf_biomarkers
+vap_df <- vap_df %>%
+  mutate(across(all_of(vap_biomarkers), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+vap_df[, vap_biomarkers] <- scale(log2(vap_df[, vap_biomarkers] + 1))
+
+vap_biomarkers_plus_id <- append(
+  vap_biomarkers, "subject_id"
+)
+
+
+vap_curr <- vap_df %>%
+  select(all_of(vap_biomarkers_plus_id)) %>%
+  filter(if_any(vap_biomarkers, ~ !is.na(.)))  # remove subject ids who have all null
+
+vap_curr <- vap_curr %>%
+  mutate(subject_id = as.numeric(subject_id))
+
+# Remove columns that have more than 20% missing
+vap_curr <- vap_curr[, which(colMeans(!is.na(vap_curr)) > 0.2)]
+
+vap_bic <- mclustBIC(vap_curr %>% select(-subject_id))
+plot(vap_bic)
+summary(vap_bic)
+
+vap_icl <- mclustICL(vap_curr %>% select(-subject_id))
+plot(vap_icl)
+summary(vap_icl)
+
+
+best_model <- Mclust(vap_curr %>% select(-subject_id), G = 4, modelNames = "VVE")
+
+vap_curr$cluster <- best_model$classification
+vap_curr <- vap_curr %>%
+  mutate(subject_id = as.character(subject_id))
+
+vap_df_cluster <- vap_df %>%
+  left_join(vap_curr %>% select(subject_id, cluster), by = "subject_id")
+
+```
+
+
+```{r rr_regressions_mclust, eval=F}
+# Initialize an empty data frame to store results
+#hospital_mortality
+#colony_10000_yes1_no0
+summary_table <- data.frame()
+# Loop over each biomarker
+for (biomarker in vap_biomarkers) {
+    print(paste0("At biomarker:", biomarker))
+    # Create the formula for the current biomarker
+    formula_rr <- as.formula(paste("colony_1000_yes1_no0 ~", biomarker, "+", "Age", "+", "Sex"))    
+    # Subset the data to include only hi_ddcfDNA and the current biomarker
+    df_current <- vap_df_cluster[, c("colony_1000_yes1_no0", biomarker,"Age", "Sex")]
+    
+    # Remove NAs
+    df_current <- na.omit(df_current)
+    
+    # Fit the model
+    fit_poisson <- glm(formula_rr, data = df_current, family = poisson(link = "log"))
+    
+    # Calculate robust standard errors
+    robust_se <- sqrt(diag(vcovHC(fit_poisson, type = "HC0")))
+    
+    # Extract coefficients
+    estimates <- coef(fit_poisson)
+    rr_estimates <- exp(estimates)
+    
+    # Calculate z-values and p-values
+    z_values <- estimates / robust_se
+    p_values <- 2 * pnorm(-abs(z_values))
+    
+    # Prepare a data frame with the results
+    # [1] is the intercept [2] is the biomarker coefficient
+    result <- data.frame(
+        Predictor = biomarker,
+        Estimate = estimates[2],
+        "Robust SE" = robust_se[2],
+        "RR" = rr_estimates[2],
+        "z value" = z_values[2],
+        "Pr(>|z|)" = p_values[2],
+        "n_observations" = nrow(df_current)
+    )
+    
+    # Append the result to the summary_table
+    summary_table <- rbind(summary_table, result)
+}
+write.xlsx(summary_table, "./rr_mclust_colony_1000_yes1_no0_2.28.25.xlsx")
+```
