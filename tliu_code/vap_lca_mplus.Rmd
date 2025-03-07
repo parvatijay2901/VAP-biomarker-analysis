@@ -30,13 +30,16 @@ source("helper_functions.R")
 ```
 
 ```{r mplus, eval=T}
-
+# Load in the dataset
 df <- read.csv("./data/Daily_merged_2025-02-28.csv")
+
+# Filter for the specific cohort and remove repeat subjects
 df <- df %>% 
   filter(repeat. == 1) %>%
   filter(!is.na(balf_PD.L1_V1_imputed)) 
 vap_df <- df %>% filter(cohort == "vap")
 
+# Define the biomarkers to be used in the analysis
 vap_balf_biomarkers <- c("Amphiregulin", "Calprotectin", "CD163", "G.CSF", "GM.CSF", "IL.12.IL.23p40",
                          "IL.15", "IL.16", "IL.17A", "IL.1α", "IL.1β_proinf", "IL.6_proinf", "IL.7",
                          #"IL-8_chemo",
@@ -44,33 +47,35 @@ vap_balf_biomarkers <- c("Amphiregulin", "Calprotectin", "CD163", "G.CSF", "GM.C
                          "IP.10_chemo", "MCP.1_chemo", "MCP.4_chemo",
                          "MIP.1α_chemo", "MIP.1β_chemo", "PD.L1", "sRAGE", "TARC_chemo", "TNF.RI", "TNF.α_proinf", "VEGF")
 
-
+# Add prefix and suffix to match with column names in the dataset.
 vap_balf_biomarkers <- paste0("balf_", vap_balf_biomarkers, "_V1_imputed")
-
 vap_biomarkers <- vap_balf_biomarkers
+
+# For any rows without a biomarker measurement - impute by the median for that biomarker
 vap_df <- vap_df %>%
   mutate(across(all_of(vap_biomarkers), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
 
-
+# Log2 scale and z-score standardize. + 1 to have no 0s
 vap_df[, vap_biomarkers] <- scale(log2(vap_df[, vap_biomarkers] + 1))
 
 vap_biomarkers_plus_id <- append(
   vap_biomarkers, "subject_id"
 )
 
-
+# Last couple of preprocessing steps - remove any subjects who have all nulls
+# in the biomarkers
 vap_curr <- vap_df %>%
   select(all_of(vap_biomarkers_plus_id)) %>%
   filter(if_any(vap_biomarkers, ~ !is.na(.)))  # remove subject ids who have all null
 
+# Convert the subject_id to a numeric type
 vap_curr <- vap_curr %>%
   mutate(subject_id = as.numeric(subject_id))
 
 # Remove columns that have more than 20% missing
 vap_curr <- vap_curr[, which(colMeans(!is.na(vap_curr)) > 0.2)]
 
-#cor(vap_df %>% select(all_of(vap_biomarkers)))
-
+# Define factors to be used in the table output
 vap_df$Sex <- factor(vap_df$Sex)
 vap_df$X28d_mortality <- factor(vap_df$X28d_mortality)
 vap_df$colony_10000_yes1_no0 <- factor(vap_df$colony_10000_yes1_no0)
@@ -83,12 +88,14 @@ vap_df$any_pressors_during_admission <- factor(vap_df$any_pressors_during_admiss
 vap_df$any_abx_during_admission <- factor(vap_df$any_abx_during_admission)
 vap_df$bronch_ecmo_0 <- factor(vap_df$bronch_ecmo_0)
 
+# Create SOFA score breaks
 vap_df <- vap_df %>%
   mutate(vfds_bronch_cat = cut(vfds_bronch,
                                breaks = c(0, 7, 14, 21, 28),
                                include.lowest = TRUE,
                                right = TRUE,
                                labels = c("0-7", "8-14", "15-21", "22-28")))
+# Define the columns that were output from MPlus
 cols <- c(
     "AMPHIREG","CALPROTE","CD163","G_CSF",
     "GM_CSF","IL_12_IL","IL_15","IL_16",
@@ -100,14 +107,19 @@ cols <- c(
     "CPROB1","CPROB2","CPROB3","CPROB4",
     "C","SUBJECT"
 )
-mplus_df <- read.table("./data/vap_lca_4_class_w_il10.txt", header = FALSE, col.names = cols)
+# Load the mplus output and assign the columns
+mplus_df <- read.table("./data/vap_lca_4_class.txt", header = FALSE, col.names = cols)
+
+# Rename the subject and cluster column to align with the dataset
 mplus_df <- mplus_df %>%
   mutate(subject_id = as.character(SUBJECT)) %>%
   mutate(cluster = C)
 
+# Write a csv of the cluster assignments
 cluster_subject_only <- mplus_df %>% select(subject_id, cluster)
 write.csv(cluster_subject_only, "./vap_mplus_cluster_assignment_no_il10.csv")
 
+# Join the cluster assignment onto the dataset
 vap_df_cluster_mplus <- vap_df %>%
   left_join(mplus_df %>% select(subject_id, cluster), by = "subject_id")
 
@@ -115,6 +127,8 @@ vap_df_cluster_mplus <- vap_df %>%
 ```
 
 ```{r mplus_heatmap, eval=T}
+# Generates a heatmap of the standardized biomarkers
+
 vap_biomarkers_plus_id_cluster <- append(vap_biomarkers, c("subject_id", "cluster"))
 vap_curr_mplus <- vap_df_cluster_mplus %>% select(all_of(vap_biomarkers_plus_id_cluster))
 vap_curr_ordered <- vap_curr_mplus %>% arrange(cluster)
@@ -123,22 +137,21 @@ biomarker_matrix <- as.matrix(vap_curr_ordered %>% select(-subject_id, -cluster)
 
 rownames(biomarker_matrix) <- vap_curr_ordered$subject_id
 
-
+# Define the colors for the each cluster
 row_ann <- rowAnnotation(
   Cluster = factor(vap_curr_ordered$cluster),
   col = list(Cluster = c("1" = "#E41A1C", "2" = "#377EB8",
                          "3" = "#4DAF4A", "4" = "#984EA3"))
 )
 
-# Generate the heatmap
 heatmap_obj <- Heatmap(
   biomarker_matrix,
-  name = "Expression",          # Legend title
-  show_row_names = FALSE,       # Hide subject names to reduce clutter
-  show_column_names = TRUE,     # Display biomarker names
-  cluster_rows = FALSE,         # Keep the order based on clusters
-  cluster_columns = TRUE,       # Optionally cluster biomarkers
-  left_annotation = row_ann,    # Attach cluster annotation to rows
+  name = "Expression",          
+  show_row_names = FALSE,       
+  show_column_names = TRUE,     
+  cluster_rows = FALSE,       
+  cluster_columns = TRUE,       
+  left_annotation = row_ann,     
   heatmap_legend_param = list(title = "Expression")
 )
 
@@ -150,7 +163,10 @@ dev.off()
 
 
 ```{r tbl1_mplus, results='asis', eval=T}
+# Generate a table 1 of the clusters
 
+
+# Unify race strings
 vap_df_cluster_mplus <- vap_df_cluster_mplus %>%
   mutate(Race = trimws(sub(",.*", "", Race))) %>%
   mutate(Race = gsub("Black or African-American", "Black or African American", Race)) %>%
@@ -159,6 +175,7 @@ vap_df_cluster_mplus <- vap_df_cluster_mplus %>%
   mutate(Race = gsub("^Pacific Islander.*", "Native Hawaiian or Pacific Islander", Race)) %>%
   mutate(Race = gsub("Unable to Collect", "Unavailable or Unknown", Race))
 
+# Create organism categorization
 desired_levels <- c("cineto1", "bahstrep2", "candida3", "citrobacter4", "oralflora5",
                     "coryneanddipther6", "enterbacter7", "ecoli8", "hinflu9",
                     "klebs10", "neisseria11", "pseudomonas12", "serratia13",
@@ -170,7 +187,7 @@ vap_df_cluster_mplus <- vap_df_cluster_mplus %>%
   mutate(mapped_organism = factor(mapped_organism, levels = desired_levels)) %>%
   arrange(mapped_organism)
 
-
+# Generate the table
 tbl1 <- tableby(
   cluster ~ Age + Sex + BMI + Race + 
     + icu_admit_type + bronch_day_1 + bronch_day_1_indexed_to_intubation + X28d_mortality + colony_1000_yes1_no0
@@ -210,6 +227,7 @@ ggsave(filename = "umap_mplus.png")
 
 
 ```{r log_regressions}
+# Run logisitic regressions with hospital mortality, vfds_bronch as an outcome and the cluster as a covariate.
 
 logit <- glm(hospital_mortality ~ cluster, data = vap_df_cluster_mplus, family = "binomial")
 summary(logit)
