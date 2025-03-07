@@ -1,0 +1,1 @@
+have the sane results here in a doc and as text!
