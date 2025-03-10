@@ -7,6 +7,6 @@ Ventilator-Associated Pneumonia (VAP) is a critical healthcare challenge in inte
 ## Objectives
 - Identify VAP Subphenotypes using unsupervised clustering techniques (LCA, K-Means, GMM).
 - Evaluate Clinical Outcomes across subphenotypes, including mortality, VFDs, and disease severity.
-- - Feature Selection Using LASSO Regression to determine which biomarkers contribute most to patient differentiation.
-Perform Statistical Tests to assess differences in demographic and clinical variables across subphenotypes.
-- Estimate Relative Risk (RR) and Odds Ratios (OR) using Modified Poisson Regression and Logistic Regression to quantify associations with clinical outcomes.
+- Feature Selection Using LASSO Regression to determine which biomarkers contribute most to patient differentiation.
+- Perform Statistical Tests to assess differences in demographic and clinical variables across subphenotypes.
+    - Estimate Relative Risk (RR) using Modified Poisson Regression and perform Logistic Regression to quantify associations with clinical outcomes.
