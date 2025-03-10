@@ -1,4 +1,4 @@
-# Ventilator-Associated Pneumonia (VAP) Subphenotype Analysis
+# Ventilator Associated Pneumonia (VAP) Subphenotype Analysis
 
 ## Project Overview
 
