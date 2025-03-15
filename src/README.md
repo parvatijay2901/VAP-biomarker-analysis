@@ -25,3 +25,6 @@ This project was conducted using the following programming languages:
 - Python (ver 3.10)
 - R (ver 4.3.2)
 - Mplus (ver 8.11)
+
+## Project Schedule
+For an overview of our timeline, key milestones, and deliverables, please refer to our [Project Schedule](https://docs.google.com/spreadsheets/d/1VE4ter8T9P7Dyw9IoaM-TGWxcX9u4XD06o6ftDjTkio/edit?usp=sharing).

@@ -170,5 +170,5 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# since we do not have permissions to have the data here, we will ignore the data folder
+# since we do not have permissions to have the data here, we will not have the data folder public
 data/
