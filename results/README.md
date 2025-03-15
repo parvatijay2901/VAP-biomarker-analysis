@@ -1,1 +1,0 @@
-Should we add anything? or is the final delivery only enough?
