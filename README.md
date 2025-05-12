@@ -1,4 +1,4 @@
-# Ventilator Associated Pneumonia (VAP) Subphenotype Analysis
+# VAP Subphenotype Analysis
 
 ![image](https://github.com/user-attachments/assets/cabba90f-1cc2-48ac-8036-8ef74abcf8e7)
 
