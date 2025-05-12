@@ -1,5 +1,7 @@
 # Ventilator Associated Pneumonia (VAP) Subphenotype Analysis
 
+![image](https://github.com/user-attachments/assets/cabba90f-1cc2-48ac-8036-8ef74abcf8e7)
+
 ## Project Overview
 Ventilator-Associated Pneumonia (VAP) is a critical healthcare challenge in intensive care units (ICUs), contributing to increased mortality and prolonged hospital stays. This project aims to identify distinct subphenotypes of VAP patients using Latent Class Analysis (LCA), K-Means Clustering, and Gaussian Mixture Models (GMM). By utilizing biomarker profiles and clinical data, we analyze associations between subphenotypes and key patient outcomes such as hospital mortality, ventilator-free days (VFDs), and severity of illness.
 
